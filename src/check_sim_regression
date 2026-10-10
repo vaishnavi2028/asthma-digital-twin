@@ -1,0 +1,16 @@
+"""With no what-if, the patched simulator must reproduce the data saved on Day 3 exactly."""
+import numpy as np
+import pandas as pd
+from simulate_patients import sim_patient
+
+env = pd.read_csv("data/raw/environment.csv", parse_dates=["timestamp"])
+ehr = pd.read_csv("data/raw/ehr.csv")
+sus = pd.read_csv("data/raw/ehr_latent.csv").set_index("patient_id").susceptibility
+saved = pd.read_csv("data/raw/timeseries.csv.gz")
+ok = True
+for pid in (0, 7, 172):
+    e = next(r for r in ehr.itertuples() if r.patient_id == pid)
+    o, _ = sim_patient(e, sus[pid], env, 42)
+    s = saved[saved.patient_id == pid].reset_index(drop=True)
+    ok &= all(np.array_equal(o[c].values, s[c].values) for c in ["hr", "resp_rate", "spo2", "steps", "rescue_puffs"])
+print("regression test:", "PASS" if ok else "FAIL")

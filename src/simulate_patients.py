@@ -26,9 +26,12 @@ def outdoor_profile():
     w[(h < 6) | (h > 21)] = 0
     return w
 
+def sim_patient(e, sus, env, seed=42, cf=None):
+    """Simulate one patient. Seeded per patient so counterfactuals reuse the same luck.
 
-def sim_patient(e, sus, env, seed=42):
-    """Simulate one patient. Seeded per patient so counterfactuals (e.g. add a purifier) reuse the same luck."""
+    cf = optional what-if applied from hour cf["start"] onward, e.g.
+    {"start": 480, "has_purifier": 1, "controller_adherence": 0.9, "outdoor_scale": 0.5, "avoid_above": 150}
+    """
     rng = np.random.default_rng([seed, int(e.patient_id)])
     n = len(env)
     hour = env.timestamp.dt.hour.values
@@ -37,19 +40,24 @@ def sim_patient(e, sus, env, seed=42):
     # ---- daily routine ----
     bed, wake = int(np.clip(round(rng.normal(23, 0.8)), 22, 23)), int(np.clip(round(rng.normal(6.5, 0.6)), 6, 7))
     asleep = (hour >= bed) | (hour < wake)
+    after = (np.arange(n) >= cf["start"]) if cf else np.zeros(n, bool)
+    def value(key, base):                                       # patient setting before / after the what-if starts
+        return np.where(after, cf[key], base) if cf and key in cf else base
     w = outdoor_profile()
     p_out = np.minimum(1.0, e.outdoor_hours_day * w / w.sum())
-    outdoors = rng.random(n) < p_out[hour]
+    outdoors = rng.random(n) < np.minimum(1.0, p_out[hour] * value("outdoor_scale", 1.0))
+    if cf and "avoid_above" in cf:                              # stay indoors when ambient PM2.5 is high
+        outdoors = outdoors & ~(after & (pm > cf["avoid_above"]))
 
     # ---- what the patient actually breathes ----
-    infil = 0.5 if e.has_purifier else 0.6                    # indoor share of outdoor PM2.5
+    infil = np.where(value("has_purifier", e.has_purifier) == 1, 0.5, 0.6)   # indoor share of outdoor PM2.5
     exposure = pm * np.where(outdoors, 1.0, infil)
     excess = np.maximum(exposure - 50, 0) / 100                # only exposure above ~50 ug/m3 irritates
     cold = np.maximum(12 - temp, 0) / 10 * outdoors            # cold air is an extra trigger outdoors
     drive = excess + 0.3 * cold
 
     # ---- hidden airway state ----
-    sens = np.exp(0.45 * np.clip(sus, -2, 2) + 0.15 * rng.standard_normal()) * (1 - 0.5 * e.controller_adherence)
+    sens = np.exp(0.45 * np.clip(sus, -2, 2) + 0.15 * rng.standard_normal()) * (1 - 0.5 * value("controller_adherence", e.controller_adherence))
     infl = lfilter([1], [1, -DECAY], sens * 0.05 * drive)      # slow accumulation of exposure
     acute = 0.15 * sens * excess                               # immediate reaction
 

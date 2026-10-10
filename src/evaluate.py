@@ -11,16 +11,18 @@ from sklearn.metrics import roc_auc_score, average_precision_score, precision_re
 from sklearn.model_selection import GroupKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from features import EHR_COLS, ENV_COLS, WEAR_COLS, TIME_COLS
+from features import EHR_COLS, ENV_COLS, WEAR_COLS, TIME_COLS, PLAN_COLS
 from modeling import P, fit_lgbm, threshold_at_spec
 
 SEED = 42
 FUSED = "Fused (EHR + wearables + air)"
+TWIN = "Twin: fused + planned exposure"
 MODELS = {
     "EHR only": EHR_COLS,
     "Wearables + inhaler": WEAR_COLS + TIME_COLS,
     "Wearables + inhaler + air": WEAR_COLS + ENV_COLS + TIME_COLS,
     FUSED: EHR_COLS + WEAR_COLS + ENV_COLS + TIME_COLS,
+    TWIN: EHR_COLS + WEAR_COLS + ENV_COLS + PLAN_COLS + TIME_COLS,
 }
 ALL = ["Rule: puffs in last 24h", "Logistic regression (all)"] + list(MODELS)
 
@@ -51,7 +53,7 @@ for fold, (tr, te) in enumerate(GroupKFold(5).split(df, groups=pid)):
     for name, cols in MODELS.items():
         m = fit_lgbm(df.loc[tr_in, cols], y[tr_in], df.loc[va_in, cols], y[va_in], SEED)
         record(name, m.predict_proba(df.loc[va_in, cols])[:, 1], m.predict_proba(df.loc[te, cols])[:, 1])
-        if name == FUSED and fold == 0:
+        if name == TWIN and fold == 0:
             # 5-seed ensemble: the spread between members is our 'model disagreement' signal
             bi, cols_f, members, pv = max(m.best_iteration_ or 40, 30), cols, [], []
             for s in range(5):
@@ -60,7 +62,7 @@ for fold, (tr, te) in enumerate(GroupKFold(5).split(df, groups=pid)):
                 pv.append(mm.predict_proba(df.loc[va_in, cols])[:, 1])
             pe = np.mean(pv, axis=0)
             cfg = dict(features=cols, thr90=threshold_at_spec(y[va_in], pe, .90), thr95=threshold_at_spec(y[va_in], pe, .95),
-                       n_trees=bi, groups=dict(ehr=EHR_COLS, env=ENV_COLS, wearable=WEAR_COLS))
+                       n_trees=bi, groups=dict(ehr=EHR_COLS, env=ENV_COLS, wearable=WEAR_COLS, plan=PLAN_COLS))
             demo_pool = np.unique(pid[te])
     print(f"fold {fold} done", flush=True)
 
@@ -98,30 +100,32 @@ for n in ALL:
         r[f"false_alerts_per_week{s}"] = float((al & (y == 0)).sum() / (len(df) / 28))
         ls, L = lead_stats(n, s)
         r.update({f"{k}{s}": v for k, v in ls.items()})
-        if n == FUSED and s == 90:
+        if n == TWIN and s == 90:
             lead_fused = L
     res[n] = r
 
 # ---------------- 3. bootstrap over patients ----------------
+# ---------------- 3. bootstrap over patients ----------------
 keys = list(by_pat)
-B = {k: [] for k in ["fused_roc", "fused_pr", "d_pr_ehr", "d_pr_air", "d_pr_vs_logreg", "d_pr_vs_rule"]}
+B = {k: [] for k in ["twin_roc", "twin_pr", "d_pr_plan", "d_pr_ehr", "d_pr_air", "d_pr_vs_logreg", "d_pr_vs_rule"]}
 for _ in range(200):
     ii = np.concatenate([by_pat[k] for k in rng.choice(keys, len(keys))])
     yy = y[ii]
-    ap = {n: average_precision_score(yy, oof[n][ii]) for n in [FUSED, "Wearables + inhaler + air", "Wearables + inhaler",
+    ap = {n: average_precision_score(yy, oof[n][ii]) for n in [TWIN, FUSED, "Wearables + inhaler + air", "Wearables + inhaler",
                                                               "Logistic regression (all)", "Rule: puffs in last 24h"]}
-    B["fused_roc"].append(roc_auc_score(yy, oof[FUSED][ii])); B["fused_pr"].append(ap[FUSED])
+    B["twin_roc"].append(roc_auc_score(yy, oof[TWIN][ii])); B["twin_pr"].append(ap[TWIN])
+    B["d_pr_plan"].append(ap[TWIN] - ap[FUSED])
     B["d_pr_ehr"].append(ap[FUSED] - ap["Wearables + inhaler + air"])
     B["d_pr_air"].append(ap["Wearables + inhaler + air"] - ap["Wearables + inhaler"])
-    B["d_pr_vs_logreg"].append(ap[FUSED] - ap["Logistic regression (all)"])
-    B["d_pr_vs_rule"].append(ap[FUSED] - ap["Rule: puffs in last 24h"])
+    B["d_pr_vs_logreg"].append(ap[TWIN] - ap["Logistic regression (all)"])
+    B["d_pr_vs_rule"].append(ap[TWIN] - ap["Rule: puffs in last 24h"])
 ci = {k: [float(np.percentile(v, 2.5)), float(np.percentile(v, 97.5))] for k, v in B.items()}
 
 # ---------------- 4. extras: early-monitoring subset and calibration ----------------
 early = t_idx < 168                                              # first week of monitoring
 res["_early_week_pr_auc"] = {n: float(average_precision_score(y[early], oof[n][early])) for n in ALL}
 res["_early_week_positives"] = int(y[early].sum())
-pf = oof[FUSED]
+pf = oof[TWIN]
 res["_brier"] = dict(model=float(brier_score_loss(y, pf)), base_rate_only=float(brier_score_loss(y, np.full(len(y), y.mean()))))
 json.dump(dict(metrics=res, bootstrap_95ci=ci, n_rows=int(len(df)), n_patients=int(len(keys)), base_rate=float(y.mean())),
           open("results/metrics.json", "w"), indent=1)
@@ -134,8 +138,8 @@ json.dump(cfg, open("models/config.json", "w"), indent=1)
 
 # ---------------- 6. figures ----------------
 fig, ax = plt.subplots(2, 2, figsize=(12, 8.5))
-for n, c in zip(["Rule: puffs in last 24h", "EHR only", "Wearables + inhaler", "Wearables + inhaler + air", FUSED],
-                ["#999", "#bbb", "#4c78a8", "#2f9e44", "#d9480f"]):
+for n, c in zip(["Rule: puffs in last 24h", "EHR only", "Wearables + inhaler", "Wearables + inhaler + air", FUSED, TWIN],
+                ["#999", "#bbb", "#4c78a8", "#2f9e44", "#d9480f", "#d9480f"]):
     pr, rc, _ = precision_recall_curve(y, oof[n]); ax[0, 0].plot(rc, pr, color=c, label=f"{n} ({res[n]['pr_auc']:.2f})")
 ax[0, 0].axhline(y.mean(), color="k", ls=":", lw=.8); ax[0, 0].set(title="Precision-recall (5-fold, by patient)", xlabel="Recall", ylabel="Precision")
 ax[0, 0].legend(fontsize=7, frameon=False)

@@ -43,11 +43,16 @@
   "temp_now",
   "temp_min_24h",
   "rh_mean_24h",
+  "pm25_fcst_mean_24h",
+  "pm25_fcst_max_24h",
+  "exp_next24_mean",
+  "exp_next24_max",
+  "exp_past24_mean",
   "hour_of_day"
  ],
- "thr90": 0.03819081281776911,
- "thr95": 0.07723811865082178,
- "n_trees": 55,
+ "thr90": 0.036436295461516256,
+ "thr95": 0.07436487683421814,
+ "n_trees": 36,
  "groups": {
   "ehr": [
    "age",
@@ -97,6 +102,13 @@
    "puffs_24h",
    "puffs_72h",
    "hours_since_puff"
+  ],
+  "plan": [
+   "pm25_fcst_mean_24h",
+   "pm25_fcst_max_24h",
+   "exp_next24_mean",
+   "exp_next24_max",
+   "exp_past24_mean"
   ]
  },
  "demo_patients": [
