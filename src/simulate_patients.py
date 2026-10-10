@@ -42,7 +42,7 @@ def sim_patient(e, sus, env, seed=42):
     outdoors = rng.random(n) < p_out[hour]
 
     # ---- what the patient actually breathes ----
-    infil = 0.25 if e.has_purifier else 0.6                    # indoor share of outdoor PM2.5
+    infil = 0.5 if e.has_purifier else 0.6                    # indoor share of outdoor PM2.5
     exposure = pm * np.where(outdoors, 1.0, infil)
     excess = np.maximum(exposure - 50, 0) / 100                # only exposure above ~50 ug/m3 irritates
     cold = np.maximum(12 - temp, 0) / 10 * outdoors            # cold air is an extra trigger outdoors
